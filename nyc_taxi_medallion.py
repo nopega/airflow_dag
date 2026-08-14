@@ -44,8 +44,45 @@ from airflow.models.param import Param
 from airflow.providers.cncf.kubernetes.operators.spark_kubernetes import (
     SparkKubernetesOperator,
 )
+from airflow.providers.smtp.notifications.smtp import send_smtp_notification
 
 NAMESPACE = "spark"
+
+# WHO HEARS ABOUT A FAILURE
+#
+# SmtpNotifier, not `email_on_failure`. The latter goes through
+# `airflow.utils.email`, which Airflow has scheduled for deprecation; the
+# notifier uses the SMTP provider and the `smtp_default` connection, which is
+# the path that will still exist in the next major version.
+#
+# The connection itself is an environment variable injected from a Kubernetes
+# Secret -- see 04_airflow_prod/04_create_smtp_secret_prod.sh. Nothing about
+# the mail server is in this file, so pointing alerts somewhere else is a
+# change to a Secret and a pod restart, not a DAG edit and a git push.
+ALERT_TO = "pongkunworker@gmail.com"
+
+# Only on failure, deliberately.
+#
+# There is no notifier on success and none on retry. A daily pipeline that
+# mails on every run produces 365 messages a year that all say "fine", and the
+# one that says otherwise arrives in a folder nobody reads any more. Retries
+# are excluded for the same reason: the first attempt failing is normal --
+# a Spot node went away, a CloudFront request timed out -- and the run still
+# succeeds. What deserves an interruption is the state after retries are
+# exhausted.
+FAILURE_NOTIFIER = send_smtp_notification(
+    to=ALERT_TO,
+    subject="[Airflow] {{ dag.dag_id }} failed — {{ ti.task_id }}",
+    html_content=(
+        "<p><b>{{ ti.task_id }}</b> failed after {{ ti.try_number }} attempt(s).</p>"
+        "<p>Processing date: <b>{{ resolve_date(params, data_interval_start) }}</b><br>"
+        "Run: {{ run_id }}</p>"
+        "<p>The Spark driver keeps its logs — the SparkApplication is not deleted "
+        "on failure:<br>"
+        "<code>kubectl logs -n spark -l spark-role=driver --tail=100</code></p>"
+        '<p><a href="{{ ti.log_url }}">Airflow task log</a></p>'
+    ),
+)
 
 # Runs are scheduled in Bangkok time, which is where the people reading the
 # dashboard are. Airflow takes a DAG's timezone from start_date, so this is
@@ -84,18 +121,42 @@ with DAG(
     default_args={
         "retries": 1,
         "retry_delay": pendulum.duration(minutes=5),
+        # Applies to all three tasks. On a linear DAG only the first failure
+        # sends -- the downstream tasks are skipped, not failed, and a skip is
+        # not a notification-worthy event.
+        "on_failure_callback": [FAILURE_NOTIFIER],
     },
     params={
         # Left empty, the DAG derives the date from its own run. Set it to
         # "2024-01-15" on a manual trigger to load one specific day.
+        # Every param below carries a `pattern`, and that is not decoration.
+        #
+        # These three values are interpolated into the https:// URL the Spark
+        # driver fetches its code from. A character that is illegal in a URI --
+        # a stray "<sha>" placeholder, a space, a brace -- makes Spark's
+        # Utils.resolveURI() throw, silently fall back to treating the whole
+        # URL as a LOCAL file path, and glob "file:/opt/spark/work-dir/https:/
+        # raw.githubusercontent.com/...". The component "https:" then fails to
+        # parse as a Path and the run dies with
+        #
+        #     URISyntaxException: Expected scheme-specific part at index 6: https:
+        #
+        # which names neither the parameter nor the URL. A pattern rejects the
+        # value at trigger time instead, while the message can still be useful.
         "date": Param(
             "",
             type="string",
+            pattern=r"^$|^\d{4}-\d{2}-\d{2}$",
             description="YYYY-MM-DD, or blank to derive from the run",
         ),
         # The image supplies the runtime; the repo below supplies the logic.
         # Both are parameters so a run can be pinned to either.
-        "image_tag": Param("v1.0.2", type="string"),
+        "image_tag": Param(
+            "v1.0.2",
+            type="string",
+            pattern=r"^[A-Za-z0-9._-]+$",
+            description="a tag in harbor.nopega.net/ice-berg-platform/datapipeline",
+        ),
         # A SEPARATE repo from this one, deliberately.
         #
         # Anyone who can push to the repo Airflow git-syncs can make Airflow
@@ -108,8 +169,18 @@ with DAG(
         # gold_aggregate.py depends on now spans two repos, and between the two
         # pushes the DAG points at code that does not have it yet. Pin
         # `pipeline_ref` to a SHA for a run that must not move underneath itself.
-        "pipeline_repo": Param("nopega/ice-berg-data-pipeline", type="string"),
-        "pipeline_ref": Param("refs/heads/main", type="string"),
+        "pipeline_repo": Param(
+            "nopega/ice-berg-data-pipeline",
+            type="string",
+            pattern=r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$",
+            description="owner/repo on GitHub, and it must be public",
+        ),
+        "pipeline_ref": Param(
+            "refs/heads/main",
+            type="string",
+            pattern=r"^[A-Za-z0-9._/-]+$",
+            description="refs/heads/main, or a commit SHA to pin the run",
+        ),
     },
     doc_md=__doc__,
     # A macro rather than a per-task `params` override, because BaseOperator's

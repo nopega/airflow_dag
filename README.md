@@ -100,6 +100,12 @@ it looks: a rule that quietly starts dropping 40% of a day is
 indistinguishable downstream from a quiet Tuesday. The task refuses to publish
 if fewer than half the rows survive.
 
+The counts come from a single aggregation pass, and they are **independent**:
+each says how many rows fail that rule on its own, so a row failing three rules
+is counted three times and the numbers do not sum to the total removed. The
+alternative — filter, count, filter, count — costs two full scans per rule and
+makes each rule's apparent impact depend on its position in the list.
+
 Also de-duplicates, resolves `payment_type` from an integer code to a name, and
 derives `trip_duration_min` and `avg_speed_mph`.
 
@@ -152,6 +158,7 @@ running known code — but cannot start a container of its own choosing.
 | symptom | cause |
 |---|---|
 | driver dies at once, 404 on `raw.githubusercontent.com` | `pipeline_repo`/`pipeline_ref` wrong, or the repo is private |
+| `URISyntaxException: Expected scheme-specific part at index 6: https:` — no driver pod at all | a param contains a character illegal in a URI, so Spark stopped seeing a URL and globbed it as a local path. The `pattern` on each Param rejects this at trigger time now |
 | `ModuleNotFoundError: common` | a shared module was added but not listed in `deps.pyFiles` |
 | driver `Pending`, task hangs | no room on `workload=critical`; `kubectl describe pod` names the reason |
 | `Initial job has not accepted any resources` | executors Pending — Spot node still starting, or the autoscaler is not running |
