@@ -1,9 +1,9 @@
-# silver: clean, type and de-duplicate one month of bronze trips.
+# silver: clean, type and de-duplicate one day of bronze trips.
 #
 # Rendered by Airflow before it is applied: SparkKubernetesOperator declares
 # template_ext = ("yaml", "yml", "json"), so this file goes through Jinja with
-# the task context available. resolve_month() is a user_defined_macro on the
-# DAG -- it returns params.month when a run overrides it, otherwise the month
+# the task context available. resolve_date() is a user_defined_macro on the
+# DAG -- it returns params.date when a run overrides it, otherwise the day
 # derived from the run's own interval.
 #
 # WHERE THE CODE COMES FROM
@@ -37,7 +37,7 @@
 apiVersion: sparkoperator.k8s.io/v1beta2
 kind: SparkApplication
 metadata:
-  name: taxi-silver-{{ resolve_month(params, data_interval_start) | replace('-', '') }}
+  name: taxi-silver-{{ resolve_date(params, data_interval_start) | replace('-', '') }}
   namespace: spark
 spec:
   type: Python
@@ -54,8 +54,8 @@ spec:
       - "https://raw.githubusercontent.com/{{ params.pipeline_repo }}/{{ params.pipeline_ref }}/pipelines/taxi/common.py"
 
   arguments:
-    - "--month"
-    - "{{ resolve_month(params, data_interval_start) }}"
+    - "--date"
+    - "{{ resolve_date(params, data_interval_start) }}"
 
   sparkVersion: "4.0.1"
 

@@ -1,9 +1,9 @@
-# bronze: land one month of NYC TLC Yellow Taxi trips.
+# bronze: land ONE DAY of NYC TLC Yellow Taxi trips.
 #
 # Rendered by Airflow before it is applied: SparkKubernetesOperator declares
 # template_ext = ("yaml", "yml", "json"), so this file goes through Jinja with
-# the task context available. resolve_month() is a user_defined_macro on the
-# DAG -- it returns params.month when a run overrides it, otherwise the month
+# the task context available. resolve_date() is a user_defined_macro on the
+# DAG -- it returns params.date when a run overrides it, otherwise the day
 # derived from the run's own interval.
 #
 # WHERE THE CODE COMES FROM
@@ -37,7 +37,7 @@
 apiVersion: sparkoperator.k8s.io/v1beta2
 kind: SparkApplication
 metadata:
-  name: taxi-bronze-{{ resolve_month(params, data_interval_start) | replace('-', '') }}
+  name: taxi-bronze-{{ resolve_date(params, data_interval_start) | replace('-', '') }}
   namespace: spark
 spec:
   type: Python
@@ -54,8 +54,8 @@ spec:
       - "https://raw.githubusercontent.com/{{ params.pipeline_repo }}/{{ params.pipeline_ref }}/pipelines/taxi/common.py"
 
   arguments:
-    - "--month"
-    - "{{ resolve_month(params, data_interval_start) }}"
+    - "--date"
+    - "{{ resolve_date(params, data_interval_start) }}"
 
   sparkVersion: "4.0.1"
 
@@ -71,9 +71,10 @@ spec:
 
   driver:
     cores: 1
-    # 2g, not the 1g the smoke test uses. The driver streams the source file
-    # through pyarrow row group by row group; the batch loop keeps that bounded,
-    # but the bound is still ~400k rows of Arrow plus the Spark JVM.
+    # 2g, not the 1g the smoke test uses. The driver streams the MONTH's file
+    # through pyarrow row group by row group and filters each batch down to the
+    # target day before Spark sees it. The loop keeps memory bounded, but the
+    # bound is still ~400k rows of Arrow plus the Spark JVM.
     memory: 2g
     serviceAccount: spark
     nodeSelector:

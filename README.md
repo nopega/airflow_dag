@@ -40,53 +40,73 @@ could this have run with"; the git ref answers "what did it run".
 
 ## Running it
 
-The DAG is `@monthly` with `catchup=False`. A scheduled run processes the month
-**two months before** its own interval, because TLC publishes with that lag —
-ask for a more recent month and CloudFront answers 403, which reads like a
-permissions problem and is not.
+The DAG runs **daily at 10:00 Asia/Bangkok** (`0 10 * * *`) with
+`catchup=False`. One day of trips per run.
 
-To load one specific month, trigger with config:
+A scheduled run processes the same calendar day **three months earlier**. TLC
+publishes each month's file roughly two months after the month ends, so
+"yesterday" does not exist as source data and never will; ask for a recent date
+and CloudFront answers 403, which reads like a permissions problem and is not.
+
+A fixed 10:00 rather than `@daily` (midnight): a failure at 10:00 is noticed the
+same morning. A failure at 00:15 is noticed at 09:00 anyway.
+
+To load one specific day, trigger with config:
 
 ```json
-{ "month": "2024-01" }
+{ "date": "2024-01-15" }
 ```
 
 Other params, all overridable per run:
 
 | param | default | what it pins |
 |---|---|---|
-| `month` | derived from the run | which month to process |
+| `date` | derived from the run, minus 3 months | which day to process |
 | `image_tag` | `v1.0.2` | the runtime |
 | `pipeline_repo` | `nopega/data-pipeline` | where the logic comes from |
 | `pipeline_ref` | `refs/heads/main` | which commit of it — set to `<sha>` to pin a run exactly |
 
 ## The three tasks
 
+Every table is partitioned on `trip_date`, and every task writes exactly one
+value of it. That is what makes each task's unit of failure and unit of repair
+the same single day.
+
 **bronze** → `data_platform.bronze.transactional.taxi_trip`
 
-Downloads the published Parquet and writes it unchanged, plus `_ingest_month`,
-`_ingested_at`, `_source_file`, `_run_id`. Partitioned on `_ingest_month`,
-which comes from the **argument** rather than from the data — a row with a
-corrupt pickup timestamp still lands in the partition it was ingested with,
-instead of creating a partition for the year 2098.
+Downloads the **month's** published Parquet, keeps only the rows whose pickup
+falls on the target day, and writes them unchanged plus `_ingested_at`,
+`_source_file`, `_run_id`.
 
-The driver streams the file through pyarrow one row group at a time. Reading a
-busy month whole would need ~4 GB of driver heap; the batch loop holds ~400k
-rows and makes the memory profile independent of the month's size.
+A monthly source feeding a daily pipeline means ~60 MB crosses the NAT gateway
+to produce ~1/30th of it — about \$0.003 a run. Deliberate: landing whole
+months would make every downstream task month-grained too, so one bad row in
+January would mean re-running all of January and the dashboard could not be
+corrected for a single day. If volume ever justifies it, cache the month in S3
+and read from there — a change to `bronze_ingest.py` only.
+
+`trip_date` is set from the **argument**, not derived from the data. The filter
+has already guaranteed they agree, and a literal cannot produce a partition for
+the year 2098 out of one corrupt timestamp.
+
+The driver streams the file through pyarrow one row group at a time and filters
+each batch in Arrow *before* Spark sees it — the difference between shipping
+3,000,000 rows through py4j and shipping 100,000.
 
 **silver** → `data_platform.silver.derived.taxi_trip_cleaned`
 
 Eleven quality rules, **each one counted and printed**. That matters more than
-it looks: a rule that quietly starts dropping 40% of a month is
-indistinguishable downstream from a quiet month. The task refuses to publish if
-fewer than half the rows survive.
+it looks: a rule that quietly starts dropping 40% of a day is
+indistinguishable downstream from a quiet Tuesday. The task refuses to publish
+if fewer than half the rows survive.
 
 Also de-duplicates, resolves `payment_type` from an integer code to a name, and
 derives `trip_duration_min` and `avg_speed_mph`.
 
 **gold** → `data_platform.gold.aggregate.taxi_daily_zone_revenue`
 
-Day × pickup zone × payment method. ~10,000 rows a month instead of ~3,000,000.
+Pickup zone × payment method, for one day. A few hundred rows instead of
+~100,000 — and a correction to one day republishes that day alone.
 
 Shaped for Power BI **Import** mode rather than DirectQuery, and that shapes
 every decision in it:
@@ -106,7 +126,7 @@ understated with nothing to show for it.
 
 ## Idempotency
 
-Every task deletes the month it is about to write, first. Airflow retries
+Every task deletes the day it is about to write, first. Airflow retries
 tasks; an append-only task retried after a partial write leaves duplicates that
 no error mentions — they surface as a revenue figure that is 1.4× too high.
 Deleting first means running a task twice leaves the same table as running it
@@ -135,6 +155,7 @@ running known code — but cannot start a container of its own choosing.
 | `ModuleNotFoundError: common` | a shared module was added but not listed in `deps.pyFiles` |
 | driver `Pending`, task hangs | no room on `workload=critical`; `kubectl describe pod` names the reason |
 | `Initial job has not accepted any resources` | executors Pending — Spot node still starting, or the autoscaler is not running |
-| `403` from CloudFront in bronze | asked for a month TLC has not published |
+| `403` from CloudFront in bronze | asked for a date in a month TLC has not published |
+| `no trips on <date>` | the date is outside the month its file covers, or a genuinely empty file |
 | `NoSuchNamespaceException` | `07_create_dg_namespaces_prod.sh` has not created the taxi leaves |
 | `ImagePullBackOff` | `harbor-pull` secret missing from the `spark` namespace |
