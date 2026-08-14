@@ -108,7 +108,7 @@ with DAG(
         # gold_aggregate.py depends on now spans two repos, and between the two
         # pushes the DAG points at code that does not have it yet. Pin
         # `pipeline_ref` to a SHA for a run that must not move underneath itself.
-        "pipeline_repo": Param("nopega/data-pipeline", type="string"),
+        "pipeline_repo": Param("nopega/ice-berg-data-pipeline", type="string"),
         "pipeline_ref": Param("refs/heads/main", type="string"),
     },
     doc_md=__doc__,

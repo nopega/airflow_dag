@@ -14,7 +14,7 @@ airflow_dag/                     <- repo root == Airflow's DAGs folder
   spark/*.yaml                   SparkApplication templates, Jinja-rendered
 ```
 
-The PySpark jobs are **not here**. They live in `github.com/nopega/data-pipeline`
+The PySpark jobs are **not here**. They live in `github.com/nopega/ice-berg-data-pipeline`
 — mirrored in this project under `pipeline_repo/`, with the reasoning in its
 README. Short version: pushing to this repo means telling Airflow what to run,
 which is a different level of trust from changing a filter in a Spark job.
@@ -27,7 +27,7 @@ two different ways and a change to one path does not affect the other.
 | what | how it gets there | when it takes effect |
 |---|---|---|
 | `nyc_taxi_medallion.py`, `spark/*.yaml` | git-sync into the Airflow pods | next scheduler parse, ~1 min after push |
-| `pipelines/taxi/*.py` (other repo) | Spark fetches them over https from `nopega/data-pipeline` at submit time | next task run |
+| `pipelines/taxi/*.py` (other repo) | Spark fetches them over https from `nopega/ice-berg-data-pipeline` at submit time | next task run |
 
 The DAG and the templates are read by **Airflow**. The pipeline code is read by
 the **Spark driver**, which Airflow never touches. That is why a fix to
@@ -63,7 +63,7 @@ Other params, all overridable per run:
 |---|---|---|
 | `date` | derived from the run, minus 3 months | which day to process |
 | `image_tag` | `v1.0.2` | the runtime |
-| `pipeline_repo` | `nopega/data-pipeline` | where the logic comes from |
+| `pipeline_repo` | `nopega/ice-berg-data-pipeline` | where the logic comes from |
 | `pipeline_ref` | `refs/heads/main` | which commit of it — set to `<sha>` to pin a run exactly |
 
 ## The three tasks
