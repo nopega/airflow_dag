@@ -1,0 +1,112 @@
+# silver: clean, type and de-duplicate one month of bronze trips.
+#
+# Rendered by Airflow before it is applied: SparkKubernetesOperator declares
+# template_ext = ("yaml", "yml", "json"), so this file goes through Jinja with
+# the task context available. resolve_month() is a user_defined_macro on the
+# DAG -- it returns params.month when a run overrides it, otherwise the month
+# derived from the run's own interval.
+#
+# WHERE THE CODE COMES FROM
+# ---------------------------
+# The image supplies the RUNTIME -- Spark 4.0.1, the Iceberg jars, the AWS SDK,
+# Python and its pinned libraries. GitHub supplies the LOGIC. Spark resolves
+# https:// URIs for the main file and for dependencies itself, so the driver
+# fetches both at submit time and nothing has to be rebuilt to change a filter.
+#
+# Two repos, deliberately: pushing to the repo Airflow git-syncs is equivalent
+# to changing what production runs, which is a different level of trust from
+# editing a Spark job. See pipeline_repo/README.md.
+#
+# WHY common.py IS LISTED SEPARATELY
+# ------------------------------------
+# Spark downloads exactly one file for mainApplicationFile. silver_clean.py
+# starts with `from common import ...`, and without the entry below that import
+# raises ModuleNotFoundError several minutes into the run -- after the pod has
+# started and the executors have been requested.
+#
+# deps.pyFiles are downloaded into the driver's working directory, which is
+# also where the main file lands, and Python puts a script's own directory on
+# sys.path. That adjacency is what makes the import resolve; a .py listed in
+# pyFiles is NOT importable by being on PYTHONPATH, because sys.path entries
+# have to be directories or archives.
+#
+# ANY NEW SHARED MODULE MUST BE ADDED HERE TOO. That is the cost of this
+# approach over shipping a whole directory, and it is the failure this comment
+# exists to prevent.
+---
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: taxi-silver-{{ resolve_month(params, data_interval_start) | replace('-', '') }}
+  namespace: spark
+spec:
+  type: Python
+  pythonVersion: "3"
+  mode: cluster
+  image: harbor.nopega.net/ice-berg-platform/datapipeline:{{ params.image_tag }}
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets:
+    - harbor-pull
+
+  mainApplicationFile: "https://raw.githubusercontent.com/{{ params.pipeline_repo }}/{{ params.pipeline_ref }}/pipelines/taxi/silver_clean.py"
+  deps:
+    pyFiles:
+      - "https://raw.githubusercontent.com/{{ params.pipeline_repo }}/{{ params.pipeline_ref }}/pipelines/taxi/common.py"
+
+  arguments:
+    - "--month"
+    - "{{ resolve_month(params, data_interval_start) }}"
+
+  sparkVersion: "4.0.1"
+
+  restartPolicy:
+    type: Never
+
+  timeToLiveSeconds: 3600
+
+  sparkConf:
+    spark.eventLog.enabled: "true"
+    spark.eventLog.dir: "s3a://data-store-prod-logs/spark-events/"
+    spark.hadoop.fs.s3a.aws.credentials.provider: "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider"
+
+  driver:
+    cores: 1
+    # 1g is enough: this driver only plans and counts. All the data moves
+    # through the executors -- nothing is collected back except row counts.
+    memory: 1g
+    serviceAccount: spark
+    nodeSelector:
+      workload: critical
+    env:
+      - name: POLARIS_URI
+        value: "http://polaris.data-platform.svc.cluster.local:8181/api/catalog"
+      - name: WAREHOUSE_BUCKET
+        value: "data-store-prod-warehouse"
+    envFrom:
+      - secretRef:
+          name: spark-polaris-credentials
+
+  executor:
+    # The executors never import the pipeline code: these jobs use only
+    # built-in Spark functions, so no Python closure is shipped to them. Adding
+    # a UDF would change that -- Spark ships pyFiles to executors as well, so
+    # the import would still resolve, but the assumption is worth naming.
+    instances: 2
+    cores: 1
+    memory: 2g
+    serviceAccount: spark
+    nodeSelector:
+      workload: batch
+    tolerations:
+      - key: "spot"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+    env:
+      - name: POLARIS_URI
+        value: "http://polaris.data-platform.svc.cluster.local:8181/api/catalog"
+      - name: WAREHOUSE_BUCKET
+        value: "data-store-prod-warehouse"
+    envFrom:
+      - secretRef:
+          name: spark-polaris-credentials
